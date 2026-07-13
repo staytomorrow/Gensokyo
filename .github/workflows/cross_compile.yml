@@ -4,8 +4,7 @@ on:
   pull_request:
     types: [opened, synchronize]
   push:
-    tags:
-      - '*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -122,6 +121,7 @@ jobs:
         path: output/gensokyo-${{ matrix.os }}-${{ matrix.goarch }}${{ endsWith(matrix.os, 'windows') && '.exe' || '' }}
 
   prepare_release:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     steps:
