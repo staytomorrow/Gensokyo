@@ -28,44 +28,17 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20.9.0' # 使用最新的 LTS 版本
+        node-version: '20.x'
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
 
-    - name: Cache Node modules
-      uses: actions/cache@v4
-      with:
-        path: |
-          frontend/node_modules
-          ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-
-    - name: Install Quasar CLI and dependencies
-      run: |
-        cd frontend
-        npm install -g @quasar/cli
-        npm install
+    - name: Install frontend dependencies
+      working-directory: frontend
+      run: npm ci
 
     - name: Build Quasar Project
-      run: |
-        cd frontend
-        quasar build
-
-    - name: Cache Android NDK
-      uses: actions/cache@v4
-      with:
-        path: |
-          ${{ github.workspace }}/android-ndk-r21e
-        key: ${{ runner.os }}-android-ndk-r21e
-
-    - name: Download and setup Android NDK
-      if: steps.cache.outputs.cache-hit != 'true' && matrix.os == 'android'
-      run: |
-        sudo apt-get install -y wget unzip
-        wget https://dl.google.com/android/repository/android-ndk-r21e-linux-x86_64.zip -O ndk.zip
-        unzip ndk.zip
-        export ANDROID_NDK_HOME=$PWD/android-ndk-r21e
-        echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+      working-directory: frontend
+      run: npm run build
 
     - name: Create output directory
       run: mkdir -p output
