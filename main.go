@@ -141,6 +141,48 @@ clearLoop:
 	return nil
 }
 
+func runCacheRebuild() error {
+	progress := newCacheCleanupProgress()
+	progress.render(0, "正在检查 idmap.db", 0, 0)
+
+	if err := idmap.OpenDBForMaintenance(); err != nil {
+		fmt.Println()
+		return err
+	}
+
+	result, rebuildErr := idmap.RebuildDatabaseWithoutBucket(idmap.CacheBucketName, func(state idmap.RebuildProgress) {
+		copied := fmt.Sprintf("已复制 %d 条（%.1f MiB）", state.Entries, float64(state.Bytes)/(1024*1024))
+		switch state.Phase {
+		case idmap.RebuildPreparing:
+			progress.render(10, "正在创建临时数据库", 0, 0)
+		case idmap.RebuildCopying:
+			progress.render(40, "正在复制保留数据，"+copied, 0, 0)
+		case idmap.RebuildSyncing:
+			progress.render(75, "正在同步新数据库，"+copied, 0, 0)
+		case idmap.RebuildReplacing:
+			progress.render(90, "正在安全替换原数据库", 0, 0)
+		case idmap.RebuildValidating:
+			progress.render(96, "正在校验新数据库", 0, 0)
+		}
+	})
+	closeErr := idmap.CloseDBWithError()
+	if rebuildErr != nil {
+		fmt.Println()
+		return fmt.Errorf("rebuild idmap.db without cache: %w", rebuildErr)
+	}
+	if closeErr != nil {
+		fmt.Println()
+		return fmt.Errorf("close rebuilt idmap.db: %w", closeErr)
+	}
+
+	progress.render(100, fmt.Sprintf("数据库重建完成，保留 %d 个 bucket、%d 条记录", result.Buckets, result.Entries), 0, 0)
+	fmt.Println()
+	if result.BackupPath != "" {
+		fmt.Printf("警告：旧数据库备份未能删除，请确认新库正常后手动删除：%s\n", result.BackupPath)
+	}
+	return nil
+}
+
 func main() {
 	// 定义faststart命令行标志。默认为false。
 	fastStart := flag.Bool("faststart", false, "start without initialization if set")
@@ -148,6 +190,7 @@ func main() {
 	cleanids := flag.Bool("clean_ids", false, "clean msg_id in ids bucket.")
 	delids := flag.Bool("del_ids", false, "delete ids bucket, must backup idmap.db first!")
 	delcache := flag.Bool("del_cache", false, "delete cache bucket, it is safe")
+	rebuildcache := flag.Bool("rebuild_cache", false, "rebuild idmap.db without cache bucket")
 	compaction := flag.Bool("compaction", false, "compaction for apply db changes.")
 	m := flag.Bool("m", false, "Maintenance mode")
 
@@ -156,6 +199,17 @@ func main() {
 
 	// 缓存清理是纯离线维护操作，不应依赖配置、WebUI 数据库、机器人
 	// Token 或网络登录。否则登录失败或未配置机器人时，清理永远不会执行。
+	if *rebuildcache {
+		if *delcache || *delids || *cleanids || *compaction || *tidy {
+			log.Println("-rebuild_cache 不能与 -del_cache、-del_ids、-clean_ids、-compaction 或 -tidy 同时使用")
+			os.Exit(2)
+		}
+		if err := runCacheRebuild(); err != nil {
+			log.Printf("数据库重建失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *delcache {
 		if *delids || *cleanids || *compaction || *tidy {
 			log.Println("-del_cache 不能与 -del_ids、-clean_ids、-compaction 或 -tidy 同时使用")
