@@ -54,6 +54,74 @@ import (
 // 消息处理器，持有 openapi 对象
 var p *Processor.Processors
 
+type cacheCleanupProgress struct {
+	lastPercent int
+}
+
+func newCacheCleanupProgress() *cacheCleanupProgress {
+	return &cacheCleanupProgress{lastPercent: -1}
+}
+
+func (p *cacheCleanupProgress) render(percent int, stage string, deleted, total int) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	if percent == p.lastPercent {
+		return
+	}
+	p.lastPercent = percent
+
+	const width = 30
+	filled := percent * width / 100
+	bar := strings.Repeat("=", filled) + strings.Repeat("-", width-filled)
+	count := ""
+	if total > 0 {
+		count = fmt.Sprintf(" (%d/%d)", deleted, total)
+	}
+	line := fmt.Sprintf("[%s] %3d%%  %s%s", bar, percent, stage, count)
+	// Clear the previous, potentially longer stage text before redrawing.
+	fmt.Printf("\r%-120s\r%s", "", line)
+}
+
+func runCacheCleanup() error {
+	progress := newCacheCleanupProgress()
+	progress.render(0, "正在检查 idmap.db", 0, 0)
+
+	if err := idmap.OpenDBForMaintenance(); err != nil {
+		fmt.Println()
+		return err
+	}
+
+	progress.render(5, "正在扫描 cache", 0, 0)
+	deleted, clearErr := idmap.ClearBucket(idmap.CacheBucketName, func(current, total int) {
+		percent := 95
+		if total > 0 {
+			percent = 5 + current*90/total
+		}
+		progress.render(percent, "正在清理 cache", current, total)
+	})
+
+	if clearErr == nil {
+		progress.render(98, "正在刷新并关闭数据库", deleted, deleted)
+	}
+	closeErr := idmap.CloseDBWithError()
+	if clearErr != nil {
+		fmt.Println()
+		return fmt.Errorf("clear cache: %w", clearErr)
+	}
+	if closeErr != nil {
+		fmt.Println()
+		return fmt.Errorf("close idmap.db: %w", closeErr)
+	}
+
+	progress.render(100, "缓存清理完成", deleted, deleted)
+	fmt.Printf("，共删除 %d 条记录。\n", deleted)
+	return nil
+}
+
 func main() {
 	// 定义faststart命令行标志。默认为false。
 	fastStart := flag.Bool("faststart", false, "start without initialization if set")
@@ -66,6 +134,20 @@ func main() {
 
 	// 解析命令行参数到定义的标志。
 	flag.Parse()
+
+	// 缓存清理是纯离线维护操作，不应依赖配置、WebUI 数据库、机器人
+	// Token 或网络登录。否则登录失败或未配置机器人时，清理永远不会执行。
+	if *delcache {
+		if *delids || *cleanids || *compaction || *tidy {
+			log.Println("-del_cache 不能与 -del_ids、-clean_ids、-compaction 或 -tidy 同时使用")
+			os.Exit(2)
+		}
+		if err := runCacheCleanup(); err != nil {
+			log.Printf("缓存清理失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// 检查是否使用了-faststart参数
 	if !*fastStart {
@@ -223,12 +305,6 @@ func main() {
 				mylog.Printf("开始删除ids\n")
 				idmap.DeleteBucket("ids")
 				mylog.Printf("ids删除完成\n")
-				return
-			}
-			if *delcache {
-				mylog.Printf("开始删除cache\n")
-				idmap.DeleteBucket("cache")
-				mylog.Printf("cache删除完成\n")
 				return
 			}
 			if *cleanids {

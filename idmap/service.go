@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,29 @@ var db *bbolt.DB
 
 var ErrKeyNotFound = errors.New("key not found")
 
+// OpenDBForMaintenance opens an existing idmap database without creating or
+// initializing it. This prevents a maintenance command run from the wrong
+// directory from silently creating and cleaning a new empty database.
+func OpenDBForMaintenance() error {
+	if db != nil {
+		return errors.New("idmap database is already open")
+	}
+
+	if _, err := os.Stat(DBName); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%s does not exist in the current directory", DBName)
+		}
+		return fmt.Errorf("stat %s: %w", DBName, err)
+	}
+
+	opened, err := bbolt.Open(DBName, 0600, &bbolt.Options{Timeout: 3 * time.Second})
+	if err != nil {
+		return fmt.Errorf("open %s: %w", DBName, err)
+	}
+	db = opened
+	return nil
+}
+
 func InitializeDB() {
 	var err error
 	// 打开数据库文件
@@ -84,30 +108,57 @@ func InitializeDB() {
 }
 
 func DeleteBucket(bucketName string) {
-	// 清空指定的bucket
-	err := db.Update(func(tx *bbolt.Tx) error {
-		// 获取指定的bucket
-		bucket := tx.Bucket([]byte(bucketName))
-		if bucket == nil {
-			mylog.Printf(bucketName + "表不存在.")
-			return nil // 如果bucket不存在，直接返回nil
-		}
-
-		// 删除bucket中的所有键值对
-		err := bucket.ForEach(func(k, v []byte) error {
-			return bucket.Delete(k)
-		})
-		if err != nil {
-			return err
-		}
-		return nil
-	})
+	_, err := ClearBucket(bucketName, nil)
 
 	if err != nil {
 		log.Fatalf("Error clearing bucket %s: %v", bucketName, err)
 	} else {
 		mylog.Printf(bucketName + "清理成功.请手动运行-compaction")
 	}
+}
+
+// ClearBucket removes all key/value pairs from a bucket and reports progress.
+// Cursor deletion is required because bbolt forbids modifying a bucket from
+// inside Bucket.ForEach.
+func ClearBucket(bucketName string, progress func(deleted, total int)) (int, error) {
+	if db == nil {
+		return 0, errors.New("idmap database is not open")
+	}
+
+	deleted := 0
+	err := db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(bucketName))
+		if bucket == nil {
+			if progress != nil {
+				progress(0, 0)
+			}
+			return nil
+		}
+
+		total := bucket.Stats().KeyN
+		if progress != nil {
+			progress(0, total)
+		}
+
+		cursor := bucket.Cursor()
+		for key, value := cursor.First(); key != nil; key, value = cursor.Next() {
+			if value == nil {
+				return fmt.Errorf("bucket %s contains nested bucket %q", bucketName, key)
+			}
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+			deleted++
+			if progress != nil {
+				progress(deleted, total)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 func CleanBucket(bucketName string) {
@@ -213,7 +264,20 @@ func Compaction(sourceDBPath, targetDBPath string) error {
 }
 
 func CloseDB() {
-	db.Close()
+	if err := CloseDBWithError(); err != nil {
+		log.Printf("Error closing idmap database: %v", err)
+	}
+}
+
+// CloseDBWithError closes the database and lets maintenance callers surface a
+// close/flush failure instead of silently discarding it.
+func CloseDBWithError() error {
+	if db == nil {
+		return nil
+	}
+	err := db.Close()
+	db = nil
+	return err
 }
 
 func GenerateRowID(id string, length int) (int64, error) {
