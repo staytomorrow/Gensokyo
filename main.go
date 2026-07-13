@@ -56,6 +56,7 @@ var p *Processor.Processors
 
 type cacheCleanupProgress struct {
 	lastPercent int
+	lastStage   string
 }
 
 func newCacheCleanupProgress() *cacheCleanupProgress {
@@ -69,10 +70,11 @@ func (p *cacheCleanupProgress) render(percent int, stage string, deleted, total 
 	if percent > 100 {
 		percent = 100
 	}
-	if percent == p.lastPercent {
+	if percent == p.lastPercent && stage == p.lastStage {
 		return
 	}
 	p.lastPercent = percent
+	p.lastStage = stage
 
 	const width = 30
 	filled := percent * width / 100
@@ -95,17 +97,34 @@ func runCacheCleanup() error {
 		return err
 	}
 
-	progress.render(5, "正在扫描 cache", 0, 0)
-	deleted, clearErr := idmap.ClearBucket(idmap.CacheBucketName, func(current, total int) {
-		percent := 95
-		if total > 0 {
-			percent = 5 + current*90/total
+	progress.render(10, "正在快速清理 cache", 0, 0)
+	clearDone := make(chan error, 1)
+	go func() {
+		clearDone <- idmap.ClearBucketFast(idmap.CacheBucketName)
+	}()
+
+	clearPercent := 10
+	animationStep := 0
+	ticker := time.NewTicker(250 * time.Millisecond)
+	var clearErr error
+clearLoop:
+	for {
+		select {
+		case clearErr = <-clearDone:
+			break clearLoop
+		case <-ticker.C:
+			if clearPercent < 90 {
+				clearPercent++
+			}
+			animationStep = (animationStep + 1) % 4
+			stage := "正在快速清理 cache" + strings.Repeat(".", animationStep)
+			progress.render(clearPercent, stage, 0, 0)
 		}
-		progress.render(percent, "正在清理 cache", current, total)
-	})
+	}
+	ticker.Stop()
 
 	if clearErr == nil {
-		progress.render(98, "正在刷新并关闭数据库", deleted, deleted)
+		progress.render(96, "cache 已清空，正在刷新数据库", 0, 0)
 	}
 	closeErr := idmap.CloseDBWithError()
 	if clearErr != nil {
@@ -117,8 +136,8 @@ func runCacheCleanup() error {
 		return fmt.Errorf("close idmap.db: %w", closeErr)
 	}
 
-	progress.render(100, "缓存清理完成", deleted, deleted)
-	fmt.Printf("，共删除 %d 条记录。\n", deleted)
+	progress.render(100, "缓存清理完成", 0, 0)
+	fmt.Println()
 	return nil
 }
 

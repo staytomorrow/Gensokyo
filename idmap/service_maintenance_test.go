@@ -8,7 +8,7 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-func TestClearBucketDeletesEveryEntryAndReportsProgress(t *testing.T) {
+func TestClearBucketFastRecreatesBucketAndPreservesOtherBuckets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "idmap.db")
 	testDB, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
@@ -37,32 +37,28 @@ func TestClearBucketDeletesEveryEntryAndReportsProgress(t *testing.T) {
 				return err
 			}
 		}
+		nested, err := cache.CreateBucket([]byte("nested"))
+		if err != nil {
+			return err
+		}
+		if err := nested.Put([]byte("nested-key"), []byte("nested-value")); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	lastCurrent := -1
-	lastTotal := -1
-	deleted, err := ClearBucket(CacheBucketName, func(current, total int) {
-		if current < lastCurrent {
-			t.Errorf("progress moved backwards: %d -> %d", lastCurrent, current)
-		}
-		lastCurrent = current
-		lastTotal = total
-	})
-	if err != nil {
+	if err := ClearBucketFast(CacheBucketName); err != nil {
 		t.Fatal(err)
-	}
-	if deleted != entryCount {
-		t.Fatalf("deleted %d entries, want %d", deleted, entryCount)
-	}
-	if lastCurrent != entryCount || lastTotal != entryCount {
-		t.Fatalf("final progress = %d/%d, want %d/%d", lastCurrent, lastTotal, entryCount, entryCount)
 	}
 
 	if err := db.View(func(tx *bbolt.Tx) error {
-		if got := tx.Bucket([]byte(CacheBucketName)).Stats().KeyN; got != 0 {
+		cache := tx.Bucket([]byte(CacheBucketName))
+		if cache == nil {
+			t.Fatal("cache bucket was not recreated")
+		}
+		if got := cache.Stats().KeyN; got != 0 {
 			t.Errorf("cache still has %d entries", got)
 		}
 		if got := tx.Bucket([]byte(BucketName)).Get([]byte("keep")); string(got) != "value" {
@@ -74,7 +70,7 @@ func TestClearBucketDeletesEveryEntryAndReportsProgress(t *testing.T) {
 	}
 }
 
-func TestClearBucketMissingBucketIsSuccessfulNoOp(t *testing.T) {
+func TestClearBucketFastMissingBucketIsSuccessfulNoOp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "idmap.db")
 	testDB, err := bbolt.Open(path, 0600, nil)
 	if err != nil {
@@ -85,17 +81,7 @@ func TestClearBucketMissingBucketIsSuccessfulNoOp(t *testing.T) {
 		_ = CloseDBWithError()
 	})
 
-	called := false
-	deleted, err := ClearBucket(CacheBucketName, func(current, total int) {
-		called = true
-		if current != 0 || total != 0 {
-			t.Errorf("progress = %d/%d, want 0/0", current, total)
-		}
-	})
-	if err != nil {
+	if err := ClearBucketFast(CacheBucketName); err != nil {
 		t.Fatal(err)
-	}
-	if deleted != 0 || !called {
-		t.Fatalf("deleted=%d, callback called=%v; want 0, true", deleted, called)
 	}
 }

@@ -108,13 +108,35 @@ func InitializeDB() {
 }
 
 func DeleteBucket(bucketName string) {
-	_, err := ClearBucket(bucketName, nil)
+	err := ClearBucketFast(bucketName)
 
 	if err != nil {
 		log.Fatalf("Error clearing bucket %s: %v", bucketName, err)
 	} else {
 		mylog.Printf(bucketName + "清理成功.请手动运行-compaction")
 	}
+}
+
+// ClearBucketFast clears a whole bucket by dropping and recreating it in one
+// transaction. It avoids the expensive full statistics scan and per-key
+// deletes used by ClearBucket, which is substantially faster for large cache
+// buckets. The database file may keep its current size, but the freed pages
+// will be reused by bbolt.
+func ClearBucketFast(bucketName string) error {
+	if db == nil {
+		return errors.New("idmap database is not open")
+	}
+
+	return db.Update(func(tx *bbolt.Tx) error {
+		if tx.Bucket([]byte(bucketName)) == nil {
+			return nil
+		}
+		if err := tx.DeleteBucket([]byte(bucketName)); err != nil {
+			return err
+		}
+		_, err := tx.CreateBucket([]byte(bucketName))
+		return err
+	})
 }
 
 // ClearBucket removes all key/value pairs from a bucket and reports progress.
